@@ -19,6 +19,7 @@ class Goal:
         self.deadline = deadline  # строка в формате "YYYY-MM-DD"
         self.reminder_threshold = reminder_threshold  # процент для уведомления
         self.history: List[dict] = []  # история изменений баланса
+        self._reminded_percents = set()  # для отслеживания уже отправленных уведомлений о процентах
 
         # Если цель создается с нуля, добавляем начальную запись в историю
         if not self.history and current_balance > 0:
@@ -49,14 +50,17 @@ class Goal:
         if self.current_balance >= self.target_amount and self.status != "выполнена":
             self.status = "выполнена"
             self._add_history_record("Цель достигнута!")
+            # БАГ ИСПРАВЛЕН: при достижении цели удаляем дедлайн, чтобы больше не напоминать
+            if self.deadline:
+                self._add_history_record(f"Дедлайн {self.deadline} отменён в связи с досрочным достижением цели")
+                self.deadline = None
             print(f"🎉 Поздравляем! Цель '{self.name}' выполнена!")
         else:
-            # Проверка на достижение порога уведомления
-            progress = self.get_progress_percent()
-            if progress >= self.reminder_threshold and not hasattr(self, '_reminded_for_' + str(
-                    int(self.reminder_threshold))):
-                print(f"🔔 Уведомление: цель '{self.name}' достигла {progress:.1f}% выполнения!")
-                setattr(self, '_reminded_for_' + str(int(self.reminder_threshold)), True)
+            # Проверка на достижение порога уведомления (каждые 10% для примера)
+            progress = int(self.get_progress_percent() / 10) * 10  # округляем до десятков
+            if progress >= self.reminder_threshold and progress not in self._reminded_percents:
+                print(f"🔔 Уведомление: цель '{self.name}' достигла {progress}% выполнения!")
+                self._reminded_percents.add(progress)
 
         return True
 
@@ -77,6 +81,8 @@ class Goal:
         if self.current_balance < self.target_amount and self.status == "выполнена":
             self.status = "активна"
             self._add_history_record("Статус изменён на 'активна' после снятия средств.")
+            # БАГ ИСПРАВЛЕН: при возврате к активному статусу дедлайн не восстанавливается автоматически
+            # (пользователь должен установить новый дедлайн через редактирование)
 
         return True
 
@@ -85,6 +91,11 @@ class Goal:
         if self.target_amount == 0:
             return 100.0
         return (self.current_balance / self.target_amount) * 100.0
+
+    def update_deadline(self, new_deadline: Optional[str]):
+        """Обновить дедлайн цели."""
+        self.deadline = new_deadline
+        self._add_history_record(f"Дедлайн обновлён: {new_deadline if new_deadline else 'удалён'}")
 
     def to_dict(self) -> dict:
         """Сериализация объекта в словарь для JSON."""
@@ -96,7 +107,8 @@ class Goal:
             "status": self.status,
             "deadline": self.deadline,
             "reminder_threshold": self.reminder_threshold,
-            "history": self.history
+            "history": self.history,
+            "reminded_percents": list(self._reminded_percents)
         }
 
     @classmethod
@@ -112,12 +124,14 @@ class Goal:
             reminder_threshold=data.get("reminder_threshold", 100.0)
         )
         goal.history = data.get("history", [])
+        goal._reminded_percents = set(data.get("reminded_percents", []))
         return goal
 
     def __str__(self) -> str:
         progress = self.get_progress_percent()
-        deadline_str = f", Дедлайн: {self.deadline}" if self.deadline else ""
-        return (f"📌 {self.name} | {self.category} | {self.status} | "
+        deadline_str = f", Дедлайн: {self.deadline}" if self.deadline and self.status != "выполнена" else ""
+        status_marker = "✅" if self.status == "выполнена" else "📌"
+        return (f"{status_marker} {self.name} | {self.category} | {self.status} | "
                 f"{self.current_balance:.2f} / {self.target_amount:.2f} ({progress:.1f}%){deadline_str}")
 
 
@@ -233,6 +247,46 @@ class PiggyBank:
         self.save_data()
         print("Баланс обновлён.")
 
+    def edit_deadline(self):
+        """Редактировать дедлайн цели (новая функция)."""
+        if not self.goals:
+            print("Нет целей.")
+            return
+
+        self.list_goals()
+        try:
+            idx = int(input("Выберите номер цели для редактирования дедлайна: ")) - 1
+            if idx < 0 or idx >= len(self.goals):
+                print("Неверный номер.")
+                return
+            goal = self.goals[idx]
+        except ValueError:
+            print("Ошибка ввода.")
+            return
+
+        if goal.status == "выполнена":
+            print("Цель уже выполнена. Дедлайн не требуется.")
+            return
+
+        print(f"Текущий дедлайн: {goal.deadline if goal.deadline else 'не установлен'}")
+        action = input("Что сделать? (установить/удалить/пропустить): ").strip().lower()
+
+        if action == "установить":
+            deadline_str = input("Новая дата завершения (ГГГГ-ММ-ДД): ")
+            try:
+                datetime.strptime(deadline_str, "%Y-%m-%d")
+                goal.update_deadline(deadline_str)
+                print(f"Дедлайн установлен на {deadline_str}")
+            except ValueError:
+                print("Неверный формат. Дедлайн не изменён.")
+        elif action == "удалить":
+            goal.update_deadline(None)
+            print("Дедлайн удалён.")
+        else:
+            print("Дедлайн не изменён.")
+
+        self.save_data()
+
     def list_goals(self):
         """Вывести список всех целей с нумерацией."""
         if not self.goals:
@@ -263,7 +317,7 @@ class PiggyBank:
                     print(f"   Процент: {goal.get_progress_percent():.1f}%")
                     print(f"   Статус: {goal.status}")
                     print(f"   Категория: {goal.category}")
-                    if goal.deadline:
+                    if goal.deadline and goal.status != "выполнена":
                         print(f"   Дедлайн: {goal.deadline}")
                     print("\n--- История изменений ---")
                     for record in goal.history[-10:]:  # последние 10 записей
@@ -325,14 +379,42 @@ class PiggyBank:
 
     def check_reminders(self):
         """Проверить цели на предмет приближения дедлайна (напоминания повышенного уровня)."""
+        if not self.goals:
+            print("Нет целей для проверки.")
+            return
+
         today = datetime.now().date()
+        reminders_found = False
+
+        print("\n🔔 ПРОВЕРКА НАПОМИНАНИЙ:")
+
         for goal in self.goals:
-            if goal.deadline and goal.status != "выполнена":
-                deadline_date = datetime.strptime(goal.deadline, "%Y-%m-%d").date()
-                days_left = (deadline_date - today).days
-                if 0 <= days_left <= 7:
-                    print(
-                        f"⏰ Напоминание: цель '{goal.name}' должна быть завершена через {days_left} дней! (Дедлайн: {goal.deadline})")
+            # Пропускаем выполненные цели
+            if goal.status == "выполнена":
+                continue
+
+            if goal.deadline:
+                try:
+                    deadline_date = datetime.strptime(goal.deadline, "%Y-%m-%d").date()
+                    days_left = (deadline_date - today).days
+
+                    if days_left < 0:
+                        print(
+                            f"⚠️ ПРОСРОЧЕНО: цель '{goal.name}' должна была быть завершена {abs(days_left)} дней назад! (Дедлайн: {goal.deadline})")
+                        reminders_found = True
+                    elif days_left == 0:
+                        print(
+                            f"🔥 СЕГОДНЯ ПОСЛЕДНИЙ ДЕНЬ! Цель '{goal.name}' должна быть завершена сегодня! (Дедлайн: {goal.deadline})")
+                        reminders_found = True
+                    elif days_left <= 7:
+                        print(
+                            f"⏰ Напоминание: цель '{goal.name}' должна быть завершена через {days_left} дней! (Дедлайн: {goal.deadline})")
+                        reminders_found = True
+                except ValueError:
+                    print(f"⚠️ Ошибка формата дедлайна для цели '{goal.name}': {goal.deadline}")
+
+        if not reminders_found:
+            print("   Нет активных напоминаний о дедлайнах.")
 
     def suggest_completion_date(self):
         """Предложить дату завершения цели на основе прогресса и частоты пополнений."""
@@ -351,40 +433,55 @@ class PiggyBank:
             print("Ошибка ввода.")
             return
 
+        if goal.status == "выполнена":
+            print(f"Цель '{goal.name}' уже выполнена!")
+            return
+
         remaining = goal.target_amount - goal.current_balance
         if remaining <= 0:
             print(f"Цель '{goal.name}' уже выполнена!")
             return
 
         # Спросить предполагаемую частоту пополнений
-        print("\nНа основе истории изменений или введите среднюю частоту пополнений.")
-        print("Пример: раз в неделю, раз в месяц и т.д.")
-        frequency = input("Частота пополнений (в днях, например 7 для еженедельно): ").strip()
+        print("\n📊 РАСЧЁТ ДАТЫ ЗАВЕРШЕНИЯ:")
+        print("Укажите предполагаемую частоту и сумму пополнений.")
 
         try:
-            days_per_deposit = float(frequency)
+            days_per_deposit = float(input("Частота пополнений (в днях, например 7 для еженедельно): "))
             if days_per_deposit <= 0:
                 raise ValueError
         except ValueError:
             print("Используем значение по умолчанию: 7 дней (раз в неделю).")
             days_per_deposit = 7.0
 
-        # Предложить среднюю сумму пополнения
         try:
             avg_amount = float(input("Средняя сумма пополнения: "))
             if avg_amount <= 0:
                 raise ValueError
         except ValueError:
-            print("Не удалось определить среднюю сумму. Расчет невозможен.")
+            print("Ошибка: сумма должна быть положительной.")
             return
 
         deposits_needed = remaining / avg_amount
         days_needed = deposits_needed * days_per_deposit
-
         suggested_date = datetime.now() + timedelta(days=days_needed)
-        print(f"📅 При сохранении текущей динамики (пополнения каждые {days_per_deposit} дней по {avg_amount:.2f}),")
-        print(f"   цель '{goal.name}' будет достигнута примерно: {suggested_date.strftime('%Y-%m-%d')}")
-        print(f"   Осталось пополнений: ~{deposits_needed:.1f}")
+
+        print(f"\n📅 Прогноз для цели '{goal.name}':")
+        print(f"   Осталось накопить: {remaining:.2f}")
+        print(f"   Требуется пополнений: ~{deposits_needed:.1f}")
+        print(f"   При пополнениях каждые {days_per_deposit} дней по {avg_amount:.2f}")
+        print(f"   Цель будет достигнута примерно: {suggested_date.strftime('%d.%m.%Y')}")
+
+        # Сравнение с дедлайном, если он установлен
+        if goal.deadline and goal.status != "выполнена":
+            deadline_date = datetime.strptime(goal.deadline, "%Y-%m-%d")
+            if suggested_date > deadline_date:
+                diff = (suggested_date - deadline_date).days
+                print(f"   ⚠️ ВНИМАНИЕ: это позже установленного дедлайна ({goal.deadline}) на {diff} дней!")
+                print(f"   Рекомендуется увеличить сумму или частоту пополнений.")
+            elif suggested_date < deadline_date:
+                diff = (deadline_date - suggested_date).days
+                print(f"   ✅ Хорошие новости: это раньше дедлайна ({goal.deadline}) на {diff} дней!")
 
 
 # ======================== Главное меню ========================
@@ -396,14 +493,15 @@ def main():
         print("         КОПИЛКА - управление накоплениями")
         print("=" * 50)
         print("1. Добавить цель")
-        print("2. Пополнить / снять с цели (изменить баланс)")
+        print("2. Пополнить / снять с цели")
         print("3. Просмотреть прогресс")
         print("4. Общий прогресс по всем целям")
         print("5. Удалить цель")
-        print("6. Проверить напоминания (дедлайны)")
-        print("7. Предложить дату завершения цели")
-        print("8. Список всех целей")
-        print("9. Выход")
+        print("6. 📅 Проверить напоминания (дедлайны)")  # ← теперь явно видно
+        print("7. 📊 Предложить дату завершения цели")
+        print("8. ✏️ Редактировать дедлайн цели")  # ← новый пункт меню
+        print("9. Список всех целей")
+        print("10. Выход")
         print("=" * 50)
 
         choice = input("Ваш выбор: ").strip()
@@ -419,12 +517,14 @@ def main():
         elif choice == "5":
             app.delete_goal()
         elif choice == "6":
-            app.check_reminders()
+            app.check_reminders()  # ← теперь пункт 6 работает корректно
         elif choice == "7":
             app.suggest_completion_date()
         elif choice == "8":
-            app.list_goals()
+            app.edit_deadline()
         elif choice == "9":
+            app.list_goals()
+        elif choice == "10":
             print("До свидания! Данные сохранены.")
             app.save_data()
             break
